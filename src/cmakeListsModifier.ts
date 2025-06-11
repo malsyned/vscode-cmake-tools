@@ -296,8 +296,11 @@ export class CMakeListsModifier implements vscode.Disposable {
         const indent = freshLineIndent(sourceList.invocation, insertPos);
         const newSourceArgument = quoteArgument(sourceList.relativePath(newSourceUri));
         const edit = new vscode.WorkspaceEdit();
+        const newText = [...sourceList.headers, newSourceArgument]
+            .map(s => `\n${indent}${s}`)
+            .join('');
         edit.insert(
-            cmakeDocument.uri, insertPos, `\n${indent}${newSourceArgument}`,
+            cmakeDocument.uri, insertPos, newText,
             {
                 label: 'CMake: Add new source file',
                 needsConfirmation: settings.addNewSourceFiles === 'ask'
@@ -872,6 +875,8 @@ async function showTargetSourceListOptions(
 }
 
 abstract class SourceList {
+    public headers: string[] = [];
+
     constructor(
         public insertOffset: number,
         public invocation: CommandInvocation,
@@ -958,7 +963,11 @@ abstract class SourceList {
         // Otherwise, assume this is a target source list command of some kind
         const scopeIndices = findIndices(args, v => SOURCE_SCOPES.includes(v.value));
         if (scopeIndices.length) {
-            return scopeIndices.map(index => new ScopeSourceList(invocation, index, target.name));
+            const existing = scopeIndices.map(index => new ScopeSourceList(invocation, index, target.name));
+            const missing = SOURCE_SCOPES
+                .filter(s => !existing.some(l => !l.fileSet && l.scope === s))
+                .map(s => new NewScopeSourceList(invocation, target.name, s));
+            return [...existing, ...missing];
         }
 
         let optionIndices;
@@ -987,15 +996,28 @@ abstract class SourceList {
 
 class ScopeSourceList extends SourceList {
     public scope: string;
+    private target: string;
     public fileSet?: {
         name: string;
         type?: string;
         baseDirs: string[];
     };
 
-    constructor(invocation: CommandInvocation, index: number, private target: string) {
+    constructor(invocation: CommandInvocation, index: number, target: string);
+    constructor(invocation: CommandInvocation, insertOffset: number, target: string, scope: string);
+    constructor(invocation: CommandInvocation, arg2: number, target: string, scope?: string) {
+        if (scope !== undefined) {
+            // Used by subclasses
+            const insertOffset = arg2;
+            super(insertOffset, invocation, target);
+            this.scope = scope;
+            this.target = target;
+            return;
+        }
+
+        let index = arg2;
         const { args } = invocation.ast;
-        const scope = args[index++].value;
+        scope = args[index++].value;
         let fileSetName: string | undefined;
         let fileSetType: string | undefined;
         const baseDirs = [];
@@ -1020,6 +1042,7 @@ class ScopeSourceList extends SourceList {
 
         super(findEndOfSourceList(args, index) as number, invocation, target);
         this.scope = scope;
+        this.target = target;
         if (fileSetName) {
             this.fileSet = {
                 name: fileSetName,
@@ -1111,6 +1134,25 @@ class ScopeSourceList extends SourceList {
             this.fileSet ? this.fileSet?.name : '',
             scopePriorities.indexOf(this.scope)
         ].concat(super.sortKeys(uri));
+    }
+}
+
+class NewScopeSourceList extends ScopeSourceList {
+    constructor(invocation: CommandInvocation, target: string, scope: string) {
+        const { lparen, args } = invocation.ast;
+        const insertOffset = args.at(-1)?.endOffset || lparen.endOffset;
+        super(invocation, insertOffset, target, scope);
+        this.headers = [scope];
+    }
+
+    public get label(): string {
+        return 'new ' + super.label;
+    }
+
+    protected sortKeys(uri: vscode.Uri): (number | string)[] {
+        const keys = super.sortKeys(uri);
+        keys[0] = 1; // sort after file sets (-1) and existing scopes (0)
+        return keys;
     }
 }
 
